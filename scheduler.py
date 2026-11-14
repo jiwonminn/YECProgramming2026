@@ -7,9 +7,19 @@ def car_window(car, hours):
     return [h for h in hours if car.arrival_hour <= h < car.departure_hour]
 
 
-def priority(car):
+# ---------- priority formulas (lower = goes first) ----------
+
+def priority_spare_kwh(car, hours, biggest):
+    """Spare kWh: extra energy the car could get beyond what it needs. Least flexible first."""
+    return len(car_window(car, hours)) * biggest - car.kwh_needed
+
+
+def priority_edf(car, hours, biggest):
     """EDF (Earliest Deadline First): the car leaving soonest goes first."""
     return car.departure_hour
+
+
+PRIORITIES = {"spare_kwh": priority_spare_kwh, "edf": priority_edf}
 
 
 def assign(state, car, charger, hour, kw):
@@ -71,18 +81,19 @@ def take_away(state, row, kw, chargers):
         state["free"][row["hour"]].append(chargers[row["charger"]])
 
 
-def repair(state, inst, costs, hours, max_rounds=20):
+def repair(state, inst, costs, hours, priority, max_rounds=20):
     """Help cars that are still short: move other cars to quieter hours to make room."""
     chargers = {c.charger_id: c for c in inst.chargers}
     charger_max = {c.charger_id: c.max_kw for c in inst.chargers}
     cars = {c.car_id: c for c in inst.cars}
+    biggest = max(charger_max.values())
 
     def short(car):
         return car.kwh_needed - state["delivered"][car.car_id]
 
     for _ in range(max_rounds):
         changed = False
-        for s in sorted(inst.cars, key=priority):
+        for s in sorted(inst.cars, key=lambda c: priority(c, hours, biggest)):
             for h in sorted(car_window(s, hours), key=lambda h: costs[h]):
                 if short(s) <= 1e-9:
                     break
@@ -118,12 +129,13 @@ def repair(state, inst, costs, hours, max_rounds=20):
             break
 
 
-def make_schedule(inst):
-    """inst = io_util.load_dir(folder). Returns a list of schedule rows."""
+def make_schedule(inst, priority):
+    """Greedy + repair using the given priority formula. Returns a list of schedule rows."""
     # cost of 1 kWh in each hour = price + CO2 cost
     costs = {h.hour: h.price_cad_per_kwh + inst.meta.carbon_price_cad_per_kg * h.co2_kg_per_kwh
              for h in inst.hours}
     hours = list(costs)
+    biggest = max(c.max_kw for c in inst.chargers)
 
     state = {
         "cap_left": {h: inst.meta.building_cap_kw for h in hours},  # power left per hour
@@ -132,8 +144,8 @@ def make_schedule(inst):
         "delivered": {c.car_id: 0 for c in inst.cars},
     }
 
-    # earliest departure first (EDF); each car takes its cheapest hours first
-    for car in sorted(inst.cars, key=priority):
+    # cars in priority order; each car takes its cheapest hours first
+    for car in sorted(inst.cars, key=lambda c: priority(c, hours, biggest)):
         for h in sorted(car_window(car, hours), key=lambda h: costs[h]):
             need = car.kwh_needed - state["delivered"][car.car_id]
             if need <= 1e-9:
@@ -144,5 +156,32 @@ def make_schedule(inst):
             kw = min(charger.max_kw, state["cap_left"][h], need)
             assign(state, car, charger, h, kw)
 
-    repair(state, inst, costs, hours)
+    repair(state, inst, costs, hours, priority)
     return state["rows"]
+
+
+# ---------- try every priority, keep the lowest score ----------
+
+def score(rows, inst):
+    """Same formula as the official scorer: electricity + CO2 cost + unmet penalty."""
+    hours = {h.hour: h for h in inst.hours}
+    delivered = {c.car_id: 0 for c in inst.cars}
+    cost = 0
+    for r in rows:
+        h = hours[r["hour"]]
+        cost += r["kw"] * (h.price_cad_per_kwh + inst.meta.carbon_price_cad_per_kg * h.co2_kg_per_kwh)
+        delivered[r["car"]] += r["kw"]
+    unmet = sum(max(0, c.kwh_needed - delivered[c.car_id]) for c in inst.cars)
+    return cost + unmet * inst.meta.unmet_penalty_cad_per_kwh
+
+
+def make_best_schedule(inst):
+    """Run the scheduler once per priority formula and return (rows, name) of the lowest score."""
+    best_rows, best_name, best_score = None, None, float("inf")
+    for name, priority in PRIORITIES.items():
+        rows = make_schedule(inst, priority)
+        s = score(rows, inst)
+        print(f"  {name:10s} score: {s:.4f}")
+        if s < best_score:
+            best_rows, best_name, best_score = rows, name, s
+    return best_rows, best_name

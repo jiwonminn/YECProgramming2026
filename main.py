@@ -5,12 +5,13 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
 from io_util import load_dir
 
-from edf_scheduler import make_schedule
+from scheduler import make_best_schedule
 from report import write_schedule, summarize
 
 folder = sys.argv[1]
 inst = load_dir(folder)
-best_rows = make_schedule(inst)
+best_rows, best_name = make_best_schedule(inst)
+print(f"using: {best_name}\n")
 
 # convert to the format report.py expects
 rows = [{"car_id": r["car"], "charger_id": r["charger"], "hour": r["hour"], "kW": r["kw"]} for r in best_rows]
