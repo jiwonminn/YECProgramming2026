@@ -7,9 +7,9 @@ def car_window(car, hours):
     return [h for h in hours if car.arrival_hour <= h < car.departure_hour]
 
 
-def spare_kwh(car, hours, biggest):
-    """Extra energy the car could get beyond what it needs. Lower = less flexible = schedule first."""
-    return len(car_window(car, hours)) * biggest - car.kwh_needed
+def priority(car):
+    """EDF (Earliest Deadline First): the car leaving soonest goes first."""
+    return car.departure_hour
 
 
 def assign(state, car, charger, hour, kw):
@@ -75,7 +75,6 @@ def repair(state, inst, costs, hours, max_rounds=20):
     """Help cars that are still short: move other cars to quieter hours to make room."""
     chargers = {c.charger_id: c for c in inst.chargers}
     charger_max = {c.charger_id: c.max_kw for c in inst.chargers}
-    biggest = max(charger_max.values())
     cars = {c.car_id: c for c in inst.cars}
 
     def short(car):
@@ -83,7 +82,7 @@ def repair(state, inst, costs, hours, max_rounds=20):
 
     for _ in range(max_rounds):
         changed = False
-        for s in sorted(inst.cars, key=lambda c: spare_kwh(c, hours, biggest)):
+        for s in sorted(inst.cars, key=priority):
             for h in sorted(car_window(s, hours), key=lambda h: costs[h]):
                 if short(s) <= 1e-9:
                     break
@@ -125,7 +124,6 @@ def make_schedule(inst):
     costs = {h.hour: h.price_cad_per_kwh + inst.meta.carbon_price_cad_per_kg * h.co2_kg_per_kwh
              for h in inst.hours}
     hours = list(costs)
-    biggest = max(c.max_kw for c in inst.chargers)
 
     state = {
         "cap_left": {h: inst.meta.building_cap_kw for h in hours},  # power left per hour
@@ -134,8 +132,8 @@ def make_schedule(inst):
         "delivered": {c.car_id: 0 for c in inst.cars},
     }
 
-    # least spare_kwh first; each car takes its cheapest hours first
-    for car in sorted(inst.cars, key=lambda c: spare_kwh(c, hours, biggest)):
+    # earliest departure first (EDF); each car takes its cheapest hours first
+    for car in sorted(inst.cars, key=priority):
         for h in sorted(car_window(car, hours), key=lambda h: costs[h]):
             need = car.kwh_needed - state["delivered"][car.car_id]
             if need <= 1e-9:
