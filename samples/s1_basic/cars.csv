@@ -1,0 +1,9 @@
+car_id,arrival_hour,departure_hour,kwh_needed,flag
+A1,8,17,24,accessible
+A2,9,18,18,none
+A3,10,16,12,visitor
+A4,7,12,20,on_call
+A5,12,20,30,none
+A6,14,22,16,visitor
+A7,8,15,10,none
+A8,11,19,22,accessible

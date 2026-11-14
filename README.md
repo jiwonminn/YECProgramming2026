@@ -1,1 +1,0 @@
-# YECProgramming2026

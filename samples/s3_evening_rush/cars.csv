@@ -1,0 +1,15 @@
+car_id,arrival_hour,departure_hour,kwh_needed,flag
+V01,17,23,12,accessible
+V02,16,20,11,none
+V03,16,19,29,none
+V04,15,19,25,on_call
+V05,15,22,10,none
+V06,16,22,18,none
+V07,15,19,14,on_call
+V08,18,24,26,accessible
+V09,17,21,19,none
+V10,16,20,20,none
+V11,16,20,14,on_call
+V12,12,17,14,none
+V13,17,22,18,none
+V14,14,21,20,none
