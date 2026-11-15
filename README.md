@@ -23,6 +23,7 @@ The project works with an input instance in one of two forms:
    - `cars.csv`
    - `hours.csv`
 2. A single `input.csv` file containing rows tagged by `record_type` values like `META`, `CHARGER`, `CAR`, and `HOUR`.
+Sample and hidden-test folders contain both forms; passing the folder uses the separate files.
 
 The loader in [tools/io_util.py](tools/io_util.py) normalizes both forms into a dataclass-based `Instance` object containing:
 
