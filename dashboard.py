@@ -7,7 +7,7 @@
     python dashboard.py samples/s2_tight_cap schedule.csv --serve --open   # live: http://127.0.0.1:8000
 
 Shows: the schedule as a sortable table with CSV download, two charts (cars charging per hour,
-CO2 kg per charger per hour), a congestion / best-hours forecast and what-if scenarios.
+CO2 kg per charger per hour), an hourly cost forecast (electricity + CO2 per kWh) and what-if scenarios.
 
 Scenario "re-plan" uses a small cost-aware greedy planner built into this file (same idea as
 tools/greedy_baseline.py but with per-hour caps). It is a stand-in so the what-ifs work today;
@@ -190,31 +190,19 @@ def build(folder, sched_path, priority):
                           cost=r["kW"] * (price + cp * e), ok=why is None, why=why or ""))
     raw = Path(sched_path).read_bytes().decode("utf-8-sig", errors="replace")
 
-    # ---- forecast: even-spread demand vs cap, best hours, supply bound
-    demand = {h: 0.0 for h in hlist}
-    for c in cars:
-        span = [h for h in range(
-            c.arrival_hour, c.departure_hour) if h in demand]
-        for h in span:
-            demand[h] += c.kwh_needed / len(span)
-    hcost = {h: hm[h].price_cad_per_kwh + cp *
-             hm[h].co2_kg_per_kwh for h in hlist}
-    # only hours when a car is actually parked
-    active = [h for h in hlist if parked[h] > 0] or hlist
-    ranked = sorted(active, key=lambda h: (hcost[h], h))
-    best = ranked[: max(3, len(active) // 4)]
-    cmax_sorted = sorted(chargers.values(), reverse=True)
-    supply = sum(min(cap, sum(cmax_sorted[: parked[h]])) for h in hlist)
-    need_total = sum(c.kwh_needed for c in cars)
-    capped = sum(min(c.kwh_needed, (cmax_sorted[0] if cmax_sorted else 0) * (
-        c.departure_hour - c.arrival_hour)) for c in cars)
-    unmet_lb = max(0.0, need_total - min(supply, capped))
+    # ---- forecast: cost of 1 kWh by hour = electricity price + CO2 cost (logic from forecast.py)
+    f_price = [hm[h].price_cad_per_kwh for h in hlist]
+    f_co2 = [hm[h].co2_kg_per_kwh for h in hlist]
+    f_co2_cost = [x * cp for x in f_co2]
+    f_total = [p + c for p, c in zip(f_price, f_co2_cost)]
+    # cheapest = lowest price, cleanest = lowest CO2, best = lowest total (price + CO2 cost)
+    cheapest = min(hlist, key=lambda h: hm[h].price_cad_per_kwh)
+    cleanest = min(hlist, key=lambda h: hm[h].co2_kg_per_kwh)
+    best = hlist[f_total.index(min(f_total))]
     forecast = dict(
-        pressure=[dict(h=h, kw=round(demand[h], 3), ratio=round(
-            demand[h] / cap, 3) if cap else 0) for h in hlist],
-        value=[dict(h=h, cost=round(hcost[h], 5), rank=ranked.index(
-            h) if h in active else None, best=h in best) for h in hlist],
-        unmet_lb=round(unmet_lb, 2), need_total=round(need_total, 2), supply=round(supply, 2))
+        hours=[dict(h=h, price=round(p, 5), co2=round(e, 5), co2_cost=round(c, 5), total=round(t, 5))
+               for h, p, e, c, t in zip(hlist, f_price, f_co2, f_co2_cost, f_total)],
+        cheapest=cheapest, cleanest=cleanest, best=best, carbon_price=cp)
 
     # ---- scenarios
     drop_h = 15 if 15 in hm else hlist[len(hlist) * 5 // 8]
@@ -273,7 +261,7 @@ def build(folder, sched_path, priority):
 
 
 # ----------------------------------------------------------------------------- page
-PAGE = r"""<!doctype html>
+PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>EV Charging Dashboard</title>
 <style>
@@ -301,8 +289,6 @@ td.n,th.n{text-align:right}tr.drop td{opacity:.5;text-decoration:line-through}
 .legend{display:flex;flex-wrap:wrap;gap:4px 8px;margin-top:6px}
 .chip{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;padding:2px 9px;font-size:12px;display:inline-flex;gap:6px;align-items:center}
 .chip i{width:10px;height:10px;border-radius:3px;display:inline-block}.chip[aria-pressed=false]{opacity:.4}
-.strip{display:grid;gap:2px}.strip div{height:26px;border-radius:4px;font-size:10px;display:flex;align-items:center;justify-content:center;color:var(--ink);border:1px solid transparent}
-.strip div.over{border-color:var(--bad)}.strip div.best{border-color:var(--good)}
 .pos{color:var(--bad)}.neg{color:var(--good)}
 #tip{position:fixed;pointer-events:none;background:#10141acc;color:#fff;padding:6px 9px;border-radius:8px;font-size:12px;display:none;z-index:9;max-width:260px;backdrop-filter:blur(4px)}
 .warn{color:var(--warn)}
@@ -322,11 +308,13 @@ td.n,th.n{text-align:right}tr.drop td{opacity:.5;text-decoration:line-through}
 <div class="card"><h2>CO2 per charger by hour (kg)</h2><div class="mute small">Stacked by charger. Click a legend chip to hide a charger.</div><div class="chart" id="c2"></div><div class="legend" id="lg2"></div></div>
 </section>
 
+<section class="card"><h2>Forecast: cost of 1 kWh by hour</h2><div class="mute small">Electricity price plus the carbon cost of that hour's grid CO2. Outlined: the blue segment marks the cheapest hour, the grey segment the cleanest.</div>
+<div class="chart" id="c3"></div><div class="legend" id="lg3"></div></section>
+
 <section class="grid two">
 <div class="card"><h2>Fairness: unmet energy by flag</h2><div class="scroll" style="max-height:none"><table id="flags"></table></div></div>
-<div class="card"><h2>Forecast</h2>
-<div class="mute small">Demand if each car charged evenly across its stay, relative to the building cap (red outline: over cap).</div><div class="strip" id="s1"></div>
-<div class="mute small" style="margin-top:8px">Hour value: price plus carbon cost (green outline: best hours).</div><div class="strip" id="s2"></div></div>
+<div class="card"><h2>Key hours</h2><div class="mute small">Where to put charging if you can choose. Cost per kWh = electricity price + CO2 cost.</div>
+<div class="scroll" style="max-height:none;margin-top:8px"><table id="keyhrs"></table></div></div>
 </section>
 
 <section class="card"><h2>What-if scenarios</h2><div class="mute small">Score change against the current schedule (+ is worse). "Hold" keeps the schedule as is; "Re-plan" reschedules with the changed conditions.</div>
@@ -381,7 +369,7 @@ function niceStep(raw,int){const p=Math.pow(10,Math.floor(Math.log10(raw||1)));f
 function frame(host,maxV,int,unit){host.innerHTML='';const W=host.clientWidth||600,H=host.clientHeight||290,m={l:44,r:10,t:10,b:30};
  const s=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img'},host);const ph=H-m.t-m.b,pw=W-m.l-m.r;
  const step=niceStep((maxV||1)/4,int),top=step*Math.max(1,Math.ceil((maxV||1)/step)),y=v=>m.t+ph-ph*v/top;
- for(let v=0;v<=top+1e-9;v+=step){el('line',{x1:m.l,x2:W-m.r,y1:y(v),y2:y(v),stroke:css('--line')},s);el('text',{x:m.l-6,y:y(v)+4,'text-anchor':'end','font-size':11,fill:css('--mute')},s,+v.toFixed(2))}
+ for(let v=0;v<=top+1e-9;v+=step){el('line',{x1:m.l,x2:W-m.r,y1:y(v),y2:y(v),stroke:css('--line')},s);el('text',{x:m.l-6,y:y(v)+4,'text-anchor':'end','font-size':11,fill:css('--mute')},s,+v.toFixed(3))}
  const n=D.hours.length,bw=pw/n,x=i=>m.l+bw*i,every=bw<24?(bw<14?3:2):1;
  D.hours.forEach((h,i)=>{if(i%every===0)el('text',{x:x(i)+bw/2,y:H-10,'text-anchor':'middle','font-size':11,fill:css('--mute')},s,h.h)});
  el('text',{x:12,y:m.t+ph/2,transform:`rotate(-90 12 ${m.t+ph/2})`,'text-anchor':'middle','font-size':11,fill:css('--mute')},s,unit);
@@ -398,16 +386,25 @@ function chart2(){const vis=D.chargers.filter(c=>!hid.has(c)),tot=D.hours.map((_
  $('#lg2').innerHTML=D.chargers.map((c,k)=>`<button class="chip" aria-pressed="${!hid.has(c)}" data-c="${esc(c)}"><i style="background:${colr(k)}"></i>${esc(c)}</button>`).join('')}
 $('#lg2').addEventListener('click',e=>{const b=e.target.closest('[data-c]');if(!b)return;hid.has(b.dataset.c)?hid.delete(b.dataset.c):hid.add(b.dataset.c);chart2()});
 
-/* forecast strips */
-function strips(){const n=D.hours.length,cols=`repeat(${n},1fr)`;
- $('#s1').style.gridTemplateColumns=cols;$('#s2').style.gridTemplateColumns=cols;
- $('#s1').innerHTML=D.forecast.pressure.map(p=>`<div class="${p.ratio>1?'over':''}" style="background:color-mix(in srgb,var(--bad) ${Math.min(80,Math.round(p.ratio*55))}%,transparent)" data-tip="${p.h}:00 | demand ${p.kw.toFixed(1)} kW (${Math.round(p.ratio*100)}% of cap)">${p.h}</div>`).join('');
- const mx=Math.max(...D.forecast.value.map(v=>v.rank===null?0:v.rank),1);
- $('#s2').innerHTML=D.forecast.value.map(v=>v.rank===null
-  ?`<div style="opacity:.4" data-tip="${v.h}:00 | no cars parked">${v.h}</div>`
-  :`<div class="${v.best?'best':''}" style="background:color-mix(in srgb,var(--good) ${Math.round(70*(1-v.rank/mx))}%,transparent)" data-tip="${v.h}:00 | $${v.cost.toFixed(4)}/kWh incl. carbon (rank ${v.rank+1} of ${mx+1})">${v.h}</div>`).join('')}
+/* forecast: stacked cost of 1 kWh by hour */
+function chartF(){const F=D.forecast,R=F.hours,f=frame($('#c3'),Math.max(...R.map(r=>r.total),0.01)*1.3,false,'$ per kWh');
+ const tags={};[[F.best,'best overall',css('--ink')],[F.cleanest,'cleanest',css('--mute')],[F.cheapest,'cheapest',css('--accent')]].forEach(([h,t,c])=>(tags[h]=tags[h]||[]).push([t,c]));
+ R.forEach((r,i)=>{const x=f.x(i)+f.bw*.15,w=f.bw*.7,y0=f.y(0),yp=f.y(r.price),yt=f.y(r.total);
+  const a=el('rect',{x,y:yp,width:w,height:Math.max(y0-yp,0),fill:css('--accent')},f.s);
+  const g=el('rect',{x,y:yt,width:w,height:Math.max(yp-yt,0),fill:css('--mute')},f.s);
+  if(r.h===F.cheapest)a.setAttribute('style',`stroke:${css('--ink')};stroke-width:1.5`);
+  if(r.h===F.cleanest)g.setAttribute('style',`stroke:${css('--ink')};stroke-width:1.5`);
+  (tags[r.h]||[]).forEach(([t,c],k)=>el('text',{x:i===0?x:i===R.length-1?x+w:x+w/2,y:yt-6-12*k,'text-anchor':i===0?'start':i===R.length-1?'end':'middle','font-size':10,'font-weight':700,fill:c},f.s,t))});
+ hover(f,(_,i)=>{const r=R[i];return `<b>${r.h}:00</b> | $${r.total.toFixed(4)}/kWh<br>Electricity: $${r.price.toFixed(4)}<br>CO2 cost: $${r.co2_cost.toFixed(4)} (${r.co2.toFixed(3)} kg/kWh)`});
+ $('#lg3').innerHTML=`<span class="chip"><i style="background:${css('--accent')}"></i>Electricity price</span><span class="chip"><i style="background:${css('--mute')}"></i>CO2 cost ($${F.carbon_price.toFixed(2)}/kg)</span>`}
+const keyRow=(l,h,v,sub)=>`<tr><td>${l}</td><td class="n">${h}:00</td><td class="n">${v}</td><td class="mute">${sub}</td></tr>`;
+(function(){const F=D.forecast,at=h=>F.hours.find(r=>r.h===h);const b=at(F.best),c=at(F.cheapest),n=at(F.cleanest);
+ $('#keyhrs').innerHTML='<thead><tr><th>Title</th><th class="n">Hour</th><th class="n">$/kWh total</th><th>Why</th></tr></thead><tbody>'+
+ keyRow('Best overall',b.h,'$'+b.total.toFixed(4),`lowest price + CO2 cost`)+
+ keyRow('Cheapest',c.h,'$'+c.total.toFixed(4),`lowest price: $${c.price.toFixed(4)}/kWh`)+
+ keyRow('Cleanest',n.h,'$'+n.total.toFixed(4),`lowest CO2: ${n.co2.toFixed(3)} kg/kWh`)+'</tbody>'})();
 if(D.live){$('#meta').textContent+=' | LIVE: refreshes when the schedule file changes';let last=null;setInterval(async()=>{try{const t=await(await fetch('/mtime',{cache:'no-store'})).text();if(last!==null&&t!==last)location.reload();last=t}catch(e){}},2000)}
-const draw=()=>{chart1();chart2()};strips();draw();new ResizeObserver(draw).observe($('#c1'));matchMedia('(prefers-color-scheme:dark)').addEventListener('change',draw);
+const draw=()=>{chart1();chart2();chartF()};draw();new ResizeObserver(draw).observe($('#c1'));matchMedia('(prefers-color-scheme:dark)').addEventListener('change',draw);
 </script></body></html>
 """
 
