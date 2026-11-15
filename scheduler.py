@@ -11,6 +11,12 @@ def car_window(car, hours):
 
 RULES = ["spare_kwh", "edf"]   # the priority rules we try; add new ones here
 
+# Fairness policy (tie-break only): if two rules give the same score, keep the one that
+# leaves these groups least short, in this order.
+# accessible: can't easily use another space or come back later.
+# on_call: may be called away (e.g. hospital) and must leave with charge.
+TIE_BREAK_ORDER = ["accessible", "on_call", "visitor", "none"]
+
 
 def priority(car, hours, biggest, rule):
     """How urgent a car is under the given rule. Lower = goes first."""
@@ -25,7 +31,7 @@ def priority(car, hours, biggest, rule):
 
 def assign(state, car, charger, hour, kw):
     """Record one charging slot and update the trackers."""
-    kw = math.floor(kw * 1e6) / 1e6  # round down so we never go over a limit
+    kw = math.floor(kw * 1e6 + 1e-6) / 1e6  # round down to 6 decimals (the +1e-6 keeps 1.2 as 1.2, not 1.199999)
     if kw <= 0:
         return
     state["rows"].append({"car": car.car_id, "charger": charger.charger_id, "hour": hour, "kw": kw})
@@ -58,7 +64,7 @@ def room(state, car, hour, charger_max):
 
 def add(state, car, hour, kw, charger_max):
     """Give a car kw more in this hour (top up its booking, or book a new charger)."""
-    kw = math.floor(kw * 1e6) / 1e6
+    kw = math.floor(kw * 1e6 + 1e-6) / 1e6
     if kw <= 0:
         return 0
     r = row_at(state, car.car_id, hour)
@@ -132,6 +138,8 @@ def repair(state, inst, costs, hours, rule, max_rounds=20):
 
 def make_schedule(inst, rule):
     """Greedy + repair using the given priority rule. Returns a list of schedule rows."""
+    if not inst.chargers or not inst.cars:
+        return []      # nothing can charge (e.g. the only charger broke)
     # cost of 1 kWh in each hour = price + CO2 cost
     costs = {h.hour: h.price_cad_per_kwh + inst.meta.carbon_price_cad_per_kg * h.co2_kg_per_kwh
              for h in inst.hours}
@@ -158,7 +166,9 @@ def make_schedule(inst, rule):
             assign(state, car, charger, h, kw)
 
     repair(state, inst, costs, hours, rule)
-    return state["rows"]
+
+    # clean up: drop leftover scraps from moving power around (< 0.001 kW), round down to 6 decimals
+    return [dict(r, kw=math.floor(r["kw"] * 1e6 + 1e-6) / 1e6) for r in state["rows"] if r["kw"] >= 1e-3]
 
 
 # ---------- try every priority, keep the lowest score ----------
@@ -176,13 +186,32 @@ def score(rows, inst):
     return cost + unmet * inst.meta.unmet_penalty_cad_per_kwh
 
 
-def make_best_schedule(inst):
-    """Run the scheduler once per priority rule and return (rows, rule) with the lowest score."""
-    best_rows, best_name, best_score = None, None, float("inf")
+def unmet_by_flag(rows, inst):
+    """kWh each group did NOT get, in tie-break order: (accessible, on_call, visitor, none)."""
+    delivered = {c.car_id: 0 for c in inst.cars}
+    for r in rows:
+        delivered[r["car"]] += r["kw"]
+    short = {f: 0.0 for f in TIE_BREAK_ORDER}
+    for c in inst.cars:
+        short[c.flag if c.flag in short else "none"] += max(0, c.kwh_needed - delivered[c.car_id])
+    return tuple(round(short[f], 6) for f in TIE_BREAK_ORDER)
+
+
+def make_best_schedule(inst, verbose=True):
+    """Run the scheduler once per priority rule and keep the best one.
+
+    Best = lowest score. If two rules tie on score, our fairness policy decides:
+    least short for accessible drivers first, then on-call, then visitors, then everyone else.
+    Returns (rows, rule).
+    """
+    best = None
     for rule in RULES:
         rows = make_schedule(inst, rule)
-        s = score(rows, inst)
-        print(f"  {rule:10s} score: {s:.4f}")
-        if s < best_score:
-            best_rows, best_name, best_score = rows, rule, s
-    return best_rows, best_name
+        short = unmet_by_flag(rows, inst)
+        key = (round(score(rows, inst), 6),) + short    # compare score first, then each group in order
+        if verbose:
+            print(f"  {rule:10s} score: {key[0]:.4f}   short (kWh) accessible {short[0]:.1f}, "
+                  f"on_call {short[1]:.1f}, visitor {short[2]:.1f}, none {short[3]:.1f}")
+        if best is None or key < best[0]:
+            best = (key, rows, rule)
+    return best[1], best[2]
