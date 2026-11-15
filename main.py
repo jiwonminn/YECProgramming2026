@@ -51,7 +51,7 @@ def main(argv=None):
     output_path = Path(argv[2]) if len(argv) > 2 else Path("schedule.csv")
 
     instance = load_dir(input_path)
-    schedule_rows, rule = make_best_schedule(instance, verbose=False)
+    schedule_rows, rule = make_best_schedule(instance)
     print(f"Selected rule: {rule}")
 
     report_rows = _as_report_rows(schedule_rows)
