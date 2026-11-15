@@ -7,19 +7,20 @@ def car_window(car, hours):
     return [h for h in hours if car.arrival_hour <= h < car.departure_hour]
 
 
-# ---------- priority formulas (lower = goes first) ----------
+# ---------- priority (lower = goes first) ----------
 
-def priority_spare_kwh(car, hours, biggest):
-    """Spare kWh: extra energy the car could get beyond what it needs. Least flexible first."""
-    return len(car_window(car, hours)) * biggest - car.kwh_needed
+RULES = ["spare_kwh", "edf"]   # the priority rules we try; add new ones here
 
 
-def priority_edf(car, hours, biggest):
-    """EDF (Earliest Deadline First): the car leaving soonest goes first."""
-    return car.departure_hour
-
-
-PRIORITIES = {"spare_kwh": priority_spare_kwh, "edf": priority_edf}
+def priority(car, hours, biggest, rule):
+    """How urgent a car is under the given rule. Lower = goes first."""
+    if rule == "spare_kwh":
+        # extra energy the car could get beyond what it needs: least flexible first
+        return len(car_window(car, hours)) * biggest - car.kwh_needed
+    if rule == "edf":
+        # Earliest Deadline First: the car leaving soonest goes first
+        return car.departure_hour
+    raise ValueError(f"unknown rule {rule}")
 
 
 def assign(state, car, charger, hour, kw):
@@ -81,7 +82,7 @@ def take_away(state, row, kw, chargers):
         state["free"][row["hour"]].append(chargers[row["charger"]])
 
 
-def repair(state, inst, costs, hours, priority, max_rounds=20):
+def repair(state, inst, costs, hours, rule, max_rounds=20):
     """Help cars that are still short: move other cars to quieter hours to make room."""
     chargers = {c.charger_id: c for c in inst.chargers}
     charger_max = {c.charger_id: c.max_kw for c in inst.chargers}
@@ -93,7 +94,7 @@ def repair(state, inst, costs, hours, priority, max_rounds=20):
 
     for _ in range(max_rounds):
         changed = False
-        for s in sorted(inst.cars, key=lambda c: priority(c, hours, biggest)):
+        for s in sorted(inst.cars, key=lambda c: priority(c, hours, biggest, rule)):
             for h in sorted(car_window(s, hours), key=lambda h: costs[h]):
                 if short(s) <= 1e-9:
                     break
@@ -129,8 +130,8 @@ def repair(state, inst, costs, hours, priority, max_rounds=20):
             break
 
 
-def make_schedule(inst, priority):
-    """Greedy + repair using the given priority formula. Returns a list of schedule rows."""
+def make_schedule(inst, rule):
+    """Greedy + repair using the given priority rule. Returns a list of schedule rows."""
     # cost of 1 kWh in each hour = price + CO2 cost
     costs = {h.hour: h.price_cad_per_kwh + inst.meta.carbon_price_cad_per_kg * h.co2_kg_per_kwh
              for h in inst.hours}
@@ -145,7 +146,7 @@ def make_schedule(inst, priority):
     }
 
     # cars in priority order; each car takes its cheapest hours first
-    for car in sorted(inst.cars, key=lambda c: priority(c, hours, biggest)):
+    for car in sorted(inst.cars, key=lambda c: priority(c, hours, biggest, rule)):
         for h in sorted(car_window(car, hours), key=lambda h: costs[h]):
             need = car.kwh_needed - state["delivered"][car.car_id]
             if need <= 1e-9:
@@ -156,7 +157,7 @@ def make_schedule(inst, priority):
             kw = min(charger.max_kw, state["cap_left"][h], need)
             assign(state, car, charger, h, kw)
 
-    repair(state, inst, costs, hours, priority)
+    repair(state, inst, costs, hours, rule)
     return state["rows"]
 
 
@@ -176,12 +177,12 @@ def score(rows, inst):
 
 
 def make_best_schedule(inst):
-    """Run the scheduler once per priority formula and return (rows, name) of the lowest score."""
+    """Run the scheduler once per priority rule and return (rows, rule) with the lowest score."""
     best_rows, best_name, best_score = None, None, float("inf")
-    for name, priority in PRIORITIES.items():
-        rows = make_schedule(inst, priority)
+    for rule in RULES:
+        rows = make_schedule(inst, rule)
         s = score(rows, inst)
-        print(f"  {name:10s} score: {s:.4f}")
+        print(f"  {rule:10s} score: {s:.4f}")
         if s < best_score:
-            best_rows, best_name, best_score = rows, name, s
+            best_rows, best_name, best_score = rows, rule, s
     return best_rows, best_name
