@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from reader import load_dir, load_schedule  # noqa: E402
+from tools.io_util import load_dir, load_schedule  # noqa: E402
 
 EPS = 1e-6
 
