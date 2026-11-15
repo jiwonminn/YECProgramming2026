@@ -1,22 +1,18 @@
 import copy
 import math
 
+# each entry is a different prioritization strategy that determines
+# the order in which cars are charged. 
+RULES = ["spare_kwh", "edf"]   
+
+# in case of a between both prioritization rules, choose the rule that maximises charge
+# for these groups in order.
+TIE_BREAK_ORDER = ["accessible", "on_call", "visitor", "none"]
+
 
 def car_window(car, hours):
     """Hours the car is parked: arrival <= h < departure."""
     return [h for h in hours if car.arrival_hour <= h < car.departure_hour]
-
-
-# ---------- priority (lower = goes first) ----------
-
-RULES = ["spare_kwh", "edf"]   # the priority rules we try; add new ones here
-
-# Fairness policy (tie-break only): if two rules give the same score, keep the one that
-# leaves these groups least short, in this order.
-# accessible: can't easily use another space or come back later.
-# on_call: may be called away (e.g. hospital) and must leave with charge.
-TIE_BREAK_ORDER = ["accessible", "on_call", "visitor", "none"]
-
 
 def priority(car, hours, biggest, rule):
     """How urgent a car is under the given rule. Lower = goes first."""
@@ -31,13 +27,13 @@ def priority(car, hours, biggest, rule):
 
 def assign(state, car, charger, hour, kw):
     """Record one charging slot and update the trackers."""
-    kw = math.floor(kw * 1e6 + 1e-6) / 1e6  # round down to 6 decimals (the +1e-6 keeps 1.2 as 1.2, not 1.199999)
+    kw = math.floor(kw * 1e6 + 1e-6) / 1e6  
     if kw <= 0:
         return
     state["rows"].append({"car": car.car_id, "charger": charger.charger_id, "hour": hour, "kw": kw})
     state["cap_left"][hour] -= kw
     state["free"][hour].remove(charger)
-    state["delivered"][car.car_id] += kw
+    state["remaining"][car.car_id] -= kw
 
 
 # ---------- repair step helpers ----------
@@ -71,7 +67,7 @@ def add(state, car, hour, kw, charger_max):
     if r:
         r["kw"] += kw
         state["cap_left"][hour] -= kw
-        state["delivered"][car.car_id] += kw
+        state["remaining"][car.car_id] -= kw
     else:
         charger = max(state["free"][hour], key=lambda c: c.max_kw)
         assign(state, car, charger, hour, kw)
@@ -82,7 +78,7 @@ def take_away(state, row, kw, chargers):
     """Remove kw from a booking; if it drops to 0, delete it and free the charger."""
     row["kw"] -= kw
     state["cap_left"][row["hour"]] += kw
-    state["delivered"][row["car"]] -= kw
+    state["remaining"][row["car"]] += kw
     if row["kw"] <= 1e-9:
         state["rows"].remove(row)
         state["free"][row["hour"]].append(chargers[row["charger"]])
@@ -96,7 +92,7 @@ def repair(state, inst, costs, hours, rule, max_rounds=20):
     biggest = max(charger_max.values())
 
     def short(car):
-        return car.kwh_needed - state["delivered"][car.car_id]
+        return state["remaining"][car.car_id]
 
     for _ in range(max_rounds):
         changed = False
@@ -149,14 +145,14 @@ def make_schedule(inst, rule):
     state = {
         "cap_left": {h: inst.meta.building_cap_kw for h in hours},  # power left per hour
         "free": {h: list(inst.chargers) for h in hours},            # unused chargers per hour
-        "rows": [],
-        "delivered": {c.car_id: 0 for c in inst.cars},
+        "rows": [],                                                 # a record of a car charging for an hour
+        "remaining": {c.car_id: c.kwh_needed for c in inst.cars},  # kWh each car still needs
     }
 
     # cars in priority order; each car takes its cheapest hours first
     for car in sorted(inst.cars, key=lambda c: priority(c, hours, biggest, rule)):
         for h in sorted(car_window(car, hours), key=lambda h: costs[h]):
-            need = car.kwh_needed - state["delivered"][car.car_id]
+            need = state["remaining"][car.car_id]
             if need <= 1e-9:
                 break
             if not state["free"][h] or state["cap_left"][h] <= 1e-9:
@@ -197,7 +193,7 @@ def unmet_by_flag(rows, inst):
     return tuple(round(short[f], 6) for f in TIE_BREAK_ORDER)
 
 
-def make_best_schedule(inst, verbose=True):
+def make_best_schedule(inst):
     """Run the scheduler once per priority rule and keep the best one.
 
     Best = lowest score. If two rules tie on score, our fairness policy decides:
@@ -209,9 +205,8 @@ def make_best_schedule(inst, verbose=True):
         rows = make_schedule(inst, rule)
         short = unmet_by_flag(rows, inst)
         key = (round(score(rows, inst), 6),) + short    # compare score first, then each group in order
-        if verbose:
-            print(f"  {rule:10s} score: {key[0]:.4f}   short (kWh) accessible {short[0]:.1f}, "
-                  f"on_call {short[1]:.1f}, visitor {short[2]:.1f}, none {short[3]:.1f}")
+        print(f"  {rule:10s} score: {key[0]:.4f}   short (kWh) accessible {short[0]:.1f}, "
+              f"on_call {short[1]:.1f}, visitor {short[2]:.1f}, none {short[3]:.1f}")
         if best is None or key < best[0]:
             best = (key, rows, rule)
     return best[1], best[2]
