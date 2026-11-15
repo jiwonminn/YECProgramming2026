@@ -1,6 +1,6 @@
 import csv, os, sys
 from collections import defaultdict
-from scheduler import solve   #change to your scheduler's function name
+# (main.py calls write_schedule and summarize, so no scheduler import needed here)
 
 def read_csv(folder, name):
     with open(os.path.join(folder, name), newline="", encoding="utf-8-sig") as f:
