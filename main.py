@@ -1,80 +1,64 @@
 #!/usr/bin/env python3
-"""Run the EV scheduler from the command line."""
 
 import sys
 from pathlib import Path
 
-# Find tools/ relative to main.py, not the current working directory.
-BASE_DIR = Path(__file__).resolve().parent
-TOOLS_DIR = BASE_DIR / "tools"
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
-
-import io_util
-from report import summarize, write_schedule
 from scheduler import make_best_schedule
+from report import summarize, write_schedule
+from tools.io_util import load_dir
 
 
-def main():
-    if len(sys.argv) not in (2, 3):
-        print(
-            f"Usage: python3 {Path(sys.argv[0]).name} <input> [output.csv]",
-            file=sys.stderr,
-        )
-        return 2
-
-    input_path = Path(sys.argv[1])
-    output_path = Path(sys.argv[2]) if len(sys.argv) == 3 else Path("schedule.csv")
-
-    # Load the input and find the best schedule.
-    instance = io_util.load_dir(input_path)
-    rows, rule = make_best_schedule(instance)
-
-    print(f"Using rule: {rule}")
-
-    # scheduler.py uses car/charger/kw, while report.py expects
-    # car_id/charger_id/kW.
-    report_rows = [
+def _as_report_rows(schedule_rows):
+    return [
         {
             "car_id": row["car"],
             "charger_id": row["charger"],
-            "hour": row["hour"],
-            "kW": row["kw"],
+            "hour": int(row["hour"]),
+            "kW": float(row["kw"]),
         }
-        for row in rows
+        for row in schedule_rows
     ]
 
-    # Write the output CSV.
-    write_schedule(report_rows, output_path)
-    print(f"Wrote {len(report_rows)} rows to {output_path}\n")
 
-    # summarize() expects plain dicts rather than the dataclasses
-    # returned by io_util.load_dir().
+def _as_report_meta(instance):
     meta = {
         "building_cap_kw": instance.meta.building_cap_kw,
         "carbon_price_cad_per_kg": instance.meta.carbon_price_cad_per_kg,
         "unmet_penalty_cad_per_kwh": instance.meta.unmet_penalty_cad_per_kwh,
     }
-
     hours = {
-        hour.hour: (
-            hour.price_cad_per_kwh,
-            hour.co2_kg_per_kwh,
-        )
+        hour.hour: (hour.price_cad_per_kwh, hour.co2_kg_per_kwh)
         for hour in instance.hours
     }
-
     cars = {
-        car.car_id: (
-            car.kwh_needed,
-            car.flag or "none",
-        )
+        car.car_id: (car.kwh_needed, car.flag)
         for car in instance.cars
     }
+    return meta, hours, cars
 
+
+def main(argv=None):
+    argv = sys.argv if argv is None else argv
+    if len(argv) < 2:
+        print(f"Usage: python3 {Path(argv[0]).name} <input> [output.csv]", file=sys.stderr)
+        return 1
+
+    input_path = Path(argv[1])
+    output_path = Path(argv[2]) if len(argv) > 2 else Path("schedule.csv")
+
+    instance = load_dir(input_path)
+    schedule_rows, rule = make_best_schedule(instance, verbose=False)
+    print(f"Selected rule: {rule}")
+
+    report_rows = _as_report_rows(schedule_rows)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_schedule(report_rows, str(output_path))
+    meta, hours, cars = _as_report_meta(instance)
     summarize(report_rows, meta, hours, cars)
-
     return 0
 
 
